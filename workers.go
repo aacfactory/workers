@@ -1,170 +1,154 @@
+/*
+ * Copyright 2021 Wang Min Xiang
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * 	http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package workers
 
 import (
-	"context"
 	"fmt"
-	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type Unit struct {
-	v        interface{}
-	meta     map[string]string
-	accepted chan bool
+const (
+	DefaultConcurrency = 256 * 1024
+	DefaultMaxIdleTime = 2 * time.Second
+)
+
+type Option func(*Options) error
+
+type Options struct {
+	Concurrency int
+	MaxIdleTime time.Duration
 }
 
-type Execute func(v interface{}, meta map[string]string)
-
-type Option struct {
-	MaxWorkerNum      int
-	MaxIdleTime       time.Duration
-	CommandTimeout    time.Duration
-	CommandBufferSize int
-	Fn                Execute
+func WithConcurrency(concurrency int) Option {
+	return func(o *Options) error {
+		if concurrency < 1 {
+			return fmt.Errorf("concurrency must gt 0")
+		}
+		o.Concurrency = concurrency
+		return nil
+	}
 }
 
-func NewWorkers(option Option) (w *Workers) {
-	maxWorkerNum := option.MaxWorkerNum
-	if maxWorkerNum < 1 {
-		maxWorkerNum = runtime.NumCPU() * 2
+func WithMaxIdleTime(maxIdleTime time.Duration) Option {
+	return func(o *Options) error {
+		if maxIdleTime < 1 {
+			return fmt.Errorf("maxIdleTime must gt 0")
+		}
+		o.MaxIdleTime = maxIdleTime
+		return nil
 	}
-	maxIdleTime := option.MaxIdleTime
-	if maxIdleTime <= 0 {
-		maxIdleTime = 10 * time.Second
+}
+
+func NewWorkers(handler UnitHandler, options ...Option) (w *workers, err error) {
+	if handler == nil {
+		err = fmt.Errorf("create workers failed for empty handler")
+		return
 	}
-	commandTimeout := option.CommandTimeout
-	if commandTimeout <= 0 {
-		commandTimeout = 2 * time.Second
+	opt := &Options{
+		Concurrency: DefaultConcurrency,
+		MaxIdleTime: DefaultMaxIdleTime,
 	}
-	commandBufferSize := option.CommandBufferSize
-	if commandBufferSize < 1 {
-		commandBufferSize = runtime.NumCPU() * 64
+	if options != nil {
+		for _, option := range options {
+			optErr := option(opt)
+			if optErr != nil {
+				err = optErr
+				return
+			}
+		}
 	}
-	fn := option.Fn
-	if fn == nil {
-		panic(fmt.Errorf("create workers failed, fn is nil"))
-	}
-	w = &Workers{
-		fn:                    fn,
-		maxWorkersCount:       maxWorkerNum,
-		maxIdleWorkerDuration: maxIdleTime,
+
+	w = &workers{
+		maxWorkersCount:       opt.Concurrency,
+		maxIdleWorkerDuration: opt.MaxIdleTime,
 		lock:                  sync.Mutex{},
 		workersCount:          0,
 		mustStop:              false,
-		commandTimeout:        commandTimeout,
-		commandBuffer:         make(chan *Unit, commandBufferSize),
+		ready:                 nil,
+		stopCh:                nil,
 		workerChanPool:        sync.Pool{},
 		unitPool:              sync.Pool{},
+		unitHandler:           handler,
 		wg:                    sync.WaitGroup{},
 	}
 	return
 }
 
-type Workers struct {
-	running               int64
-	fn                    Execute
+type unit struct {
+	action  string
+	payload interface{}
+}
+
+type UnitHandler interface {
+	Handle(action string, payload interface{})
+}
+
+type workerUnitFnChan struct {
+	lastUseTime time.Time
+	ch          chan *unit
+}
+
+type workers struct {
 	maxWorkersCount       int
 	maxIdleWorkerDuration time.Duration
 	lock                  sync.Mutex
 	workersCount          int
 	mustStop              bool
-	ready                 []*workerChan
-	commandTimeout        time.Duration
-	commandBuffer         chan *Unit
+	ready                 []*workerUnitFnChan
 	stopCh                chan struct{}
 	workerChanPool        sync.Pool
 	unitPool              sync.Pool
+	unitHandler           UnitHandler
 	wg                    sync.WaitGroup
 }
 
-func (w *Workers) Command(v interface{}, metaKvs ...string) (ok bool) {
-	if atomic.LoadInt64(&w.running) == int64(0) {
-		ok = false
+func (w *workers) Execute(action string, payload interface{}) (ok bool) {
+	if action == "" {
 		return
 	}
-	unit := w.unitPool.Get().(*Unit)
-	unit.v = v
-	unit.meta = make(map[string]string)
-	if metaKvs != nil {
-		for i := 0; i < len(metaKvs); i++ {
-			k := metaKvs[i]
-			i++
-			v := metaKvs[i]
-			unit.meta[k] = v
-		}
+	ch := w.getCh()
+	if ch == nil {
+		return false
 	}
-	ctx, cancel := context.WithTimeout(context.TODO(), w.commandTimeout)
-	select {
-	case w.commandBuffer <- unit:
-		ok = true
-		break
-	case <-ctx.Done():
-		ok = false
-		break
-	}
-	if !ok {
-		unit.v = nil
-		if len(unit.meta) != 0 {
-			unit.meta = make(map[string]string)
-		}
-		w.unitPool.Put(unit)
-		cancel()
-		return
-	}
-	ok = false
-	select {
-	case ok = <-unit.accepted:
-		if !ok {
-			unit.v = nil
-			if len(unit.meta) != 0 {
-				unit.meta = make(map[string]string)
-			}
-			w.unitPool.Put(unit)
-		}
-		break
-	case <-ctx.Done():
-		ok = false
-		break
-	}
-	cancel()
-	return
+	w.wg.Add(1)
+	u := w.unitPool.Get().(*unit)
+	u.action = action
+	u.payload = payload
+	ch.ch <- u
+	return true
 }
 
-type workerChan struct {
-	lastUseTime time.Time
-	ch          chan *Unit
-}
-
-var workerChanCap = func() int {
-	if runtime.GOMAXPROCS(0) == 1 {
-		return 0
-	}
-	return 1
-}()
-
-func (w *Workers) Start() {
+func (w *workers) Start() {
 	if w.stopCh != nil {
 		panic("workers is already started")
 	}
 	w.stopCh = make(chan struct{})
 	stopCh := w.stopCh
 	w.workerChanPool.New = func() interface{} {
-		return &workerChan{
-			ch: make(chan *Unit, workerChanCap),
+		return &workerUnitFnChan{
+			ch: make(chan *unit, 1),
 		}
 	}
 	w.unitPool.New = func() interface{} {
-		return &Unit{
-			v:        nil,
-			meta:     make(map[string]string),
-			accepted: make(chan bool, workerChanCap),
-		}
+		return &unit{}
 	}
-	go w.listen()
 	go func() {
-		var scratch []*workerChan
+		var scratch []*workerUnitFnChan
 		for {
 			w.clean(&scratch)
 			select {
@@ -175,18 +159,14 @@ func (w *Workers) Start() {
 			}
 		}
 	}()
-	w.running = 1
 }
 
-func (w *Workers) Stop() {
+func (w *workers) Stop() {
 	if w.stopCh == nil {
 		panic("workers wasn't started")
 	}
-	w.running = 0
 	close(w.stopCh)
-	close(w.commandBuffer)
 	w.stopCh = nil
-
 	w.lock.Lock()
 	ready := w.ready
 	for i := range ready {
@@ -198,36 +178,11 @@ func (w *Workers) Stop() {
 	w.lock.Unlock()
 }
 
-func (w *Workers) Sync() {
+func (w *workers) Sync() {
 	w.wg.Wait()
 }
 
-func (w *Workers) listen() {
-	for {
-		unit, ok := <-w.commandBuffer
-		if !ok {
-			break
-		}
-		var ch *workerChan = nil
-		for i := 0; i < 5; i++ {
-			ch = w.getCh()
-			if ch == nil {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			break
-		}
-		if ch == nil {
-			unit.accepted <- false
-			continue
-		}
-		w.wg.Add(1)
-		unit.accepted <- true
-		ch.ch <- unit
-	}
-}
-
-func (w *Workers) clean(scratch *[]*workerChan) {
+func (w *workers) clean(scratch *[]*workerUnitFnChan) {
 	maxIdleWorkerDuration := w.maxIdleWorkerDuration
 
 	criticalTime := time.Now().Add(-maxIdleWorkerDuration)
@@ -266,8 +221,8 @@ func (w *Workers) clean(scratch *[]*workerChan) {
 	}
 }
 
-func (w *Workers) getCh() *workerChan {
-	var ch *workerChan
+func (w *workers) getCh() *workerUnitFnChan {
+	var ch *workerUnitFnChan
 	createWorker := false
 
 	w.lock.Lock()
@@ -290,16 +245,16 @@ func (w *Workers) getCh() *workerChan {
 			return nil
 		}
 		vch := w.workerChanPool.Get()
-		ch = vch.(*workerChan)
+		ch = vch.(*workerUnitFnChan)
 		go func() {
-			w.work(ch)
+			w.handle(ch)
 			w.workerChanPool.Put(vch)
 		}()
 	}
 	return ch
 }
 
-func (w *Workers) release(ch *workerChan) bool {
+func (w *workers) release(ch *workerUnitFnChan) bool {
 	ch.lastUseTime = time.Now()
 	w.lock.Lock()
 	if w.mustStop {
@@ -311,23 +266,16 @@ func (w *Workers) release(ch *workerChan) bool {
 	return true
 }
 
-func (w *Workers) work(ch *workerChan) {
-	var unit *Unit
+func (w *workers) handle(ch *workerUnitFnChan) {
+	var u *unit
 
-	for unit = range ch.ch {
-		if unit == nil {
+	for u = range ch.ch {
+		if u == nil {
 			break
 		}
-
-		w.fn(unit.v, unit.meta)
+		w.unitHandler.Handle(u.action, u.payload)
+		w.unitPool.Put(u)
 		w.wg.Done()
-		unit.v = nil
-		if len(unit.meta) != 0 {
-			unit.meta = make(map[string]string)
-		}
-
-		w.unitPool.Put(unit)
-
 		if !w.release(ch) {
 			break
 		}
