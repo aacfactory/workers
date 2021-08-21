@@ -54,7 +54,7 @@ func WithMaxIdleTime(maxIdleTime time.Duration) Option {
 	}
 }
 
-func NewWorkers(handler UnitHandler, options ...Option) (w *workers, err error) {
+func New(handler UnitHandler, options ...Option) (w Workers, err error) {
 	if handler == nil {
 		err = fmt.Errorf("create workers failed for empty handler")
 		return
@@ -87,6 +87,12 @@ func NewWorkers(handler UnitHandler, options ...Option) (w *workers, err error) 
 		wg:                    sync.WaitGroup{},
 	}
 	return
+}
+
+type Workers interface {
+	Execute(action string, payload interface{}) (ok bool)
+	Start()
+	Stop()
 }
 
 type unit struct {
@@ -176,9 +182,6 @@ func (w *workers) Stop() {
 	w.ready = ready[:0]
 	w.mustStop = true
 	w.lock.Unlock()
-}
-
-func (w *workers) Sync() {
 	w.wg.Wait()
 }
 

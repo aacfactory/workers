@@ -26,7 +26,7 @@ import (
 
 func TestNewWorkers(t *testing.T) {
 
-	worker, workErr := workers.NewWorkers(&Handler{})
+	worker, workErr := workers.New(&Handler{})
 	if workErr != nil {
 		t.Error(workErr)
 		return
@@ -40,7 +40,6 @@ func TestNewWorkers(t *testing.T) {
 		}
 	}
 	worker.Stop()
-	worker.Sync()
 	fmt.Println("ok", x)
 }
 

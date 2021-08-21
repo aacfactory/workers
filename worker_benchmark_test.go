@@ -27,7 +27,7 @@ import (
 
 func BenchmarkNewWorkers(b *testing.B) {
 
-	worker, workErr := workers.NewWorkers(&BHandler{})
+	worker, workErr := workers.New(&BHandler{})
 	if workErr != nil {
 		b.Error(workErr)
 		return

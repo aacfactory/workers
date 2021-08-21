@@ -18,19 +18,19 @@ func (h *Handler) Handle(action string, payload interface{}) {
 // todo
 }
 
-worker, workErr := workers.NewWorkers(&Handler{})
+workers, workErr := workers.New(&Handler{})
 if workErr != nil {
 // handle error
 return
 }
 
-worker.Start()
+workers.Start()
 
-if ok := worker.Execute("test", i); !ok {
+if ok := workers.Execute("test", i); !ok {
 // handle 'not accepted'
 }
 
-worker.Stop()
+workers.Stop()
 ```
 
 ### 性能对比
