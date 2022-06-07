@@ -1,54 +1,55 @@
-# 概述
+# WORKERS
 
-一个 Golang 的 goroutine 池。
+workers pool for Golang
 
-## 安装
+## Install
 
 ```go
 go get -u github.com/aacfactory/workers
 ```
 
-## 使用
-
+## Usage
+Create worker command handler
 ```go
-type Handler struct {
+type Handler struct {}
+
+func (h *Handler) Handle(command interface{}) {
+    // todo: handle command
 }
 
-func (h *Handler) Handle(action string, payload interface{}) {
-// todo
+```
+New workers and execute command
+```go
+workers := workers.New(&Handler{})
+
+
+if ok := workers.Execute(struct{}); !ok {
+    // todo: handle 'no workers remain' or 'closed'
 }
 
-workers, workErr := workers.New(&Handler{})
-if workErr != nil {
-// handle error
-return
-}
-
-workers.Start()
-
-if ok := workers.Execute("test", i); !ok {
-// handle 'not accepted'
-}
-
-workers.Stop()
+workers.Close()
 ```
 
-### 性能对比
+## Benchmark
+Handler used in benchmark is sleeping 50 millisecond as handling command.
+```text
+goos: windows
+goarch: amd64
+pkg: github.com/aacfactory/workers
+cpu: AMD Ryzen 9 3950X 16-Core Processor
+BenchmarkNewWorkers
+    worker_benchmark_test.go:37: total 1 accepted 1
+    worker_benchmark_test.go:37: total 100 accepted 100
+    worker_benchmark_test.go:37: total 10000 accepted 10000
+    worker_benchmark_test.go:37: total 266420 accepted 266420
+    worker_benchmark_test.go:37: total 834958 accepted 834958
+    worker_benchmark_test.go:37: total 1104766 accepted 1104766
+BenchmarkNewWorkers-32           1104766               953.7 ns/op            25
+ B/op          1 allocs/op
+PASS
+```
 
-goos: windows <br>
-goarch: amd64 <br>
-pkg: github.com/aacfactory/workers <br>
-cpu: AMD Ryzen 9 3950X 16-Core Processor <br>
-
-### workers
-
-BenchmarkNewWorkers-32: 923985, 1173 ns/op, 11 B/op, 1 allocs/op
-
-### goroutine
-
-BenchmarkChanWorkers-32: 64825, 16936 ns/op, 8 B/op, 0 allocs/op
-
-## 参考感谢
+## Thanks
 
 * [valyala/fasthttp](https://github.com/valyala/fasthttp)
 

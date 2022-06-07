@@ -23,138 +23,130 @@ import (
 )
 
 const (
-	DefaultConcurrency = 256 * 1024
-	DefaultMaxIdleTime = 2 * time.Second
+	defaultConcurrency           = 256 * 1024
+	defaultWorkerMaxIdleDuration = 2 * time.Second
 )
 
 type Option func(*Options) error
 
 type Options struct {
-	Concurrency int
-	MaxIdleTime time.Duration
+	Concurrency           int
+	WorkerMaxIdleDuration time.Duration
 }
 
-func WithConcurrency(concurrency int) Option {
+func Concurrency(concurrency int) Option {
 	return func(o *Options) error {
 		if concurrency < 1 {
-			return fmt.Errorf("concurrency must gt 0")
+			return fmt.Errorf("concurrency must great than 0")
 		}
 		o.Concurrency = concurrency
 		return nil
 	}
 }
 
-func WithMaxIdleTime(maxIdleTime time.Duration) Option {
+func WorkerMaxIdleDuration(d time.Duration) Option {
 	return func(o *Options) error {
-		if maxIdleTime < 1 {
-			return fmt.Errorf("maxIdleTime must gt 0")
+		if d < 1 {
+			return fmt.Errorf("max idle duration must great than 0")
 		}
-		o.MaxIdleTime = maxIdleTime
+		o.WorkerMaxIdleDuration = d
 		return nil
 	}
 }
 
-func New(handler UnitHandler, options ...Option) (w Workers, err error) {
+func New(handler Handler, options ...Option) (w Workers) {
 	if handler == nil {
-		err = fmt.Errorf("create workers failed for empty handler")
+		panic(fmt.Errorf("new workers failed for handler is nil"))
 		return
 	}
 	opt := &Options{
-		Concurrency: DefaultConcurrency,
-		MaxIdleTime: DefaultMaxIdleTime,
+		Concurrency:           defaultConcurrency,
+		WorkerMaxIdleDuration: defaultWorkerMaxIdleDuration,
 	}
 	if options != nil {
 		for _, option := range options {
 			optErr := option(opt)
 			if optErr != nil {
-				err = optErr
+				panic(fmt.Errorf("new workers failed, %v", optErr))
 				return
 			}
 		}
 	}
-
-	w = &workers{
-		maxWorkersCount:       opt.Concurrency,
-		maxIdleWorkerDuration: opt.MaxIdleTime,
+	ws := &workers{
+		maxWorkersCount:       int64(opt.Concurrency),
+		maxIdleWorkerDuration: opt.WorkerMaxIdleDuration,
 		lock:                  sync.Mutex{},
 		workersCount:          0,
 		mustStop:              false,
 		ready:                 nil,
 		stopCh:                nil,
 		workerChanPool:        sync.Pool{},
-		unitPool:              sync.Pool{},
-		unitHandler:           handler,
-		wg:                    sync.WaitGroup{},
+		handler:               handler,
 	}
+	ws.serve()
+	w = ws
 	return
 }
 
 type Workers interface {
-	Execute(action string, payload interface{}) (ok bool)
-	Start()
-	Stop()
+	Execute(command interface{}) (ok bool)
+	Close()
 }
 
-type unit struct {
-	action  string
-	payload interface{}
+type Handler interface {
+	Handle(payload interface{})
 }
 
-type UnitHandler interface {
-	Handle(action string, payload interface{})
-}
-
-type workerUnitFnChan struct {
+type workerChan struct {
 	lastUseTime time.Time
-	ch          chan *unit
+	ch          chan interface{}
 }
 
 type workers struct {
-	maxWorkersCount       int
+	maxWorkersCount       int64
 	maxIdleWorkerDuration time.Duration
 	lock                  sync.Mutex
-	workersCount          int
+	workersCount          int64
 	mustStop              bool
-	ready                 []*workerUnitFnChan
+	ready                 []*workerChan
 	stopCh                chan struct{}
 	workerChanPool        sync.Pool
-	unitPool              sync.Pool
-	unitHandler           UnitHandler
-	wg                    sync.WaitGroup
+	handler               Handler
 }
 
-func (w *workers) Execute(action string, payload interface{}) (ok bool) {
-	if action == "" {
-		return
-	}
-	ch := w.getCh()
+func (w *workers) Execute(command interface{}) (ok bool) {
+	ch := w.getReady()
 	if ch == nil {
 		return false
 	}
-	w.wg.Add(1)
-	u := w.unitPool.Get().(*unit)
-	u.action = action
-	u.payload = payload
-	ch.ch <- u
+	ch.ch <- command
 	return true
 }
 
-func (w *workers) Start() {
-	if w.stopCh != nil {
-		panic("workers is already started")
+func (w *workers) Close() {
+	close(w.stopCh)
+	w.stopCh = nil
+	w.lock.Lock()
+	ready := w.ready
+	for i := range ready {
+		ready[i].ch <- nil
+		ready[i] = nil
 	}
+	w.ready = ready[:0]
+	w.mustStop = true
+	w.lock.Unlock()
+}
+
+func (w *workers) serve() {
 	w.stopCh = make(chan struct{})
 	stopCh := w.stopCh
 	w.workerChanPool.New = func() interface{} {
-		return &workerUnitFnChan{
-			ch: make(chan *unit, 1),
+		return &workerChan{
+			ch: make(chan interface{}, 1),
 		}
 	}
-	w.unitPool.New = func() interface{} {
-		return &unit{}
-	}
 	go func() {
-		var scratch []*workerUnitFnChan
+		var scratch []*workerChan
 		for {
 			w.clean(&scratch)
 			select {
@@ -167,33 +159,12 @@ func (w *workers) Start() {
 	}()
 }
 
-func (w *workers) Stop() {
-	if w.stopCh == nil {
-		panic("workers wasn't started")
-	}
-	close(w.stopCh)
-	w.stopCh = nil
-	w.lock.Lock()
-	ready := w.ready
-	for i := range ready {
-		ready[i].ch <- nil
-		ready[i] = nil
-	}
-	w.ready = ready[:0]
-	w.mustStop = true
-	w.lock.Unlock()
-	w.wg.Wait()
-}
-
-func (w *workers) clean(scratch *[]*workerUnitFnChan) {
+func (w *workers) clean(scratch *[]*workerChan) {
 	maxIdleWorkerDuration := w.maxIdleWorkerDuration
-
 	criticalTime := time.Now().Add(-maxIdleWorkerDuration)
-
 	w.lock.Lock()
 	ready := w.ready
 	n := len(ready)
-
 	l, r, mid := 0, n-1, 0
 	for l <= r {
 		mid = (l + r) / 2
@@ -208,7 +179,6 @@ func (w *workers) clean(scratch *[]*workerUnitFnChan) {
 		w.lock.Unlock()
 		return
 	}
-
 	*scratch = append((*scratch)[:0], ready[:i+1]...)
 	m := copy(ready, ready[i+1:])
 	for i = m; i < n; i++ {
@@ -216,7 +186,6 @@ func (w *workers) clean(scratch *[]*workerUnitFnChan) {
 	}
 	w.ready = ready[:m]
 	w.lock.Unlock()
-
 	tmp := *scratch
 	for i := range tmp {
 		tmp[i].ch <- nil
@@ -224,10 +193,9 @@ func (w *workers) clean(scratch *[]*workerUnitFnChan) {
 	}
 }
 
-func (w *workers) getCh() *workerUnitFnChan {
-	var ch *workerUnitFnChan
+func (w *workers) getReady() *workerChan {
+	var ch *workerChan
 	createWorker := false
-
 	w.lock.Lock()
 	ready := w.ready
 	n := len(ready) - 1
@@ -242,13 +210,12 @@ func (w *workers) getCh() *workerUnitFnChan {
 		w.ready = ready[:n]
 	}
 	w.lock.Unlock()
-
 	if ch == nil {
 		if !createWorker {
 			return nil
 		}
 		vch := w.workerChanPool.Get()
-		ch = vch.(*workerUnitFnChan)
+		ch = vch.(*workerChan)
 		go func() {
 			w.handle(ch)
 			w.workerChanPool.Put(vch)
@@ -257,7 +224,7 @@ func (w *workers) getCh() *workerUnitFnChan {
 	return ch
 }
 
-func (w *workers) release(ch *workerUnitFnChan) bool {
+func (w *workers) release(ch *workerChan) bool {
 	ch.lastUseTime = time.Now()
 	w.lock.Lock()
 	if w.mustStop {
@@ -269,21 +236,17 @@ func (w *workers) release(ch *workerUnitFnChan) bool {
 	return true
 }
 
-func (w *workers) handle(ch *workerUnitFnChan) {
-	var u *unit
-
-	for u = range ch.ch {
-		if u == nil {
+func (w *workers) handle(wch *workerChan) {
+	for {
+		command, ok := <-wch.ch
+		if !ok {
 			break
 		}
-		w.unitHandler.Handle(u.action, u.payload)
-		w.unitPool.Put(u)
-		w.wg.Done()
-		if !w.release(ch) {
+		w.handler.Handle(command)
+		if !w.release(wch) {
 			break
 		}
 	}
-
 	w.lock.Lock()
 	w.workersCount--
 	w.lock.Unlock()

@@ -18,63 +18,27 @@ package workers_test
 
 import (
 	"github.com/aacfactory/workers"
-	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func BenchmarkNewWorkers(b *testing.B) {
-
-	worker, workErr := workers.New(&BHandler{})
-	if workErr != nil {
-		b.Error(workErr)
-		return
-	}
-	worker.Start()
+	worker := workers.New(&BHandler{}, workers.Concurrency(1024*32*8))
 	count := int64(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if worker.Execute("test", i) {
+		if worker.Execute(i) {
 			atomic.AddInt64(&count, 1)
 		}
 	}
-
-	worker.Stop()
-	b.Log(count, b.N)
+	worker.Close()
+	b.Log("total", b.N, "accepted", count)
 }
 
-type BHandler struct {
-}
+type BHandler struct{}
 
-func (h *BHandler) Handle(action string, payload interface{}) {
-	time.Sleep(50 * time.Microsecond)
-}
-
-func BenchmarkChanWorkers(b *testing.B) {
-	ch := make(chan interface{}, runtime.NumCPU()*1024)
-	wg := &sync.WaitGroup{}
-	for i := 0; i < runtime.NumCPU()*2; i++ {
-		go func(ch chan interface{}, wg *sync.WaitGroup) {
-			for {
-				_, ok := <-ch
-				if !ok {
-					break
-				}
-				time.Sleep(50 * time.Microsecond)
-				wg.Done()
-			}
-		}(ch, wg)
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		wg.Add(1)
-		ch <- i
-	}
-	wg.Wait()
-	close(ch)
-
+func (h *BHandler) Handle(_ interface{}) {
+	time.Sleep(50 * time.Millisecond)
 }

@@ -17,7 +17,6 @@
 package workers_test
 
 import (
-	"context"
 	"fmt"
 	"github.com/aacfactory/workers"
 	"testing"
@@ -25,41 +24,21 @@ import (
 )
 
 func TestNewWorkers(t *testing.T) {
-
-	worker, workErr := workers.New(&Handler{})
-	if workErr != nil {
-		t.Error(workErr)
-		return
-	}
-	worker.Start()
+	worker := workers.New(&Handler{})
 	x := 0
 	for i := 0; i < 10; i++ {
-		ok := worker.Execute("test", i)
+		ok := worker.Execute(i)
 		if ok {
 			x++
 		}
 	}
-	worker.Stop()
+	worker.Close()
 	fmt.Println("ok", x)
 }
 
-type Handler struct {
-}
+type Handler struct{}
 
-func (h *Handler) Handle(action string, payload interface{}) {
-	fmt.Println(action, payload)
+func (h *Handler) Handle(payload interface{}) {
+	fmt.Println(payload)
 	time.Sleep(50 * time.Microsecond)
-}
-
-func Fn(unit interface{}, meta map[string]string) {
-	fmt.Println("do", unit, meta)
-	time.Sleep(1 * time.Second)
-}
-
-func TestContext(t *testing.T) {
-	fmt.Println(context.Background().Done() == nil)
-	ctx := context.TODO()
-	ctx0, cn := context.WithTimeout(ctx, 10*time.Second)
-	fmt.Println(ctx0.Deadline())
-	cn()
 }
