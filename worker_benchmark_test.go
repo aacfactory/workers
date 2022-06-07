@@ -24,12 +24,12 @@ import (
 )
 
 func BenchmarkNewWorkers(b *testing.B) {
-	worker := workers.New(&BHandler{}, workers.Concurrency(1024*32*8))
+	worker := workers.New(workers.MaxWorkers(1024 * 32 * 8))
 	count := int64(0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if worker.Execute(i) {
+		if worker.Dispatch(&BenchmarkTask{}) {
 			atomic.AddInt64(&count, 1)
 		}
 	}
@@ -37,8 +37,8 @@ func BenchmarkNewWorkers(b *testing.B) {
 	b.Log("total", b.N, "accepted", count)
 }
 
-type BHandler struct{}
+type BenchmarkTask struct{}
 
-func (h *BHandler) Handle(_ interface{}) {
+func (task *BenchmarkTask) Execute() {
 	time.Sleep(50 * time.Millisecond)
 }

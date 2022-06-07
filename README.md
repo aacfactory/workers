@@ -9,25 +9,28 @@ go get -u github.com/aacfactory/workers
 ```
 
 ## Usage
-Create worker command handler
+Create worker task
 ```go
-type Handler struct {}
+type Task struct {}
 
-func (h *Handler) Handle(command interface{}) {
-    // todo: handle command
+func (task *Task) Execute() {
+    // todo: handle task
 }
 
 ```
 New workers and execute command
 ```go
-workers := workers.New(&Handler{})
+ws := workers.New()
 
-
-if ok := workers.Execute(struct{}); !ok {
+// dispatch task to worker
+if ok := ws.Dispatch(&Task{}); !ok {
     // todo: handle 'no workers remain' or 'closed'
 }
 
-workers.Close()
+// must dispatch task to worker 
+ws.MustDispatch(&Task{})
+
+ws.Close()
 ```
 
 ## Benchmark

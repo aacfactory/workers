@@ -24,10 +24,12 @@ import (
 )
 
 func TestNewWorkers(t *testing.T) {
-	worker := workers.New(&Handler{})
+	worker := workers.New()
 	x := 0
 	for i := 0; i < 10; i++ {
-		ok := worker.Execute(i)
+		ok := worker.Dispatch(&Task{
+			Id: i,
+		})
 		if ok {
 			x++
 		}
@@ -36,9 +38,23 @@ func TestNewWorkers(t *testing.T) {
 	fmt.Println("ok", x)
 }
 
-type Handler struct{}
+func TestWorkers_MustDispatch(t *testing.T) {
+	worker := workers.New(workers.MaxWorkers(2))
+	for i := 0; i < 10; i++ {
+		worker.MustDispatch(&Task{
+			Id: i,
+		})
 
-func (h *Handler) Handle(payload interface{}) {
-	fmt.Println(payload)
+	}
+	worker.Close()
+	fmt.Println("ok")
+}
+
+type Task struct {
+	Id int
+}
+
+func (task *Task) Execute() {
+	fmt.Println(task.Id)
 	time.Sleep(50 * time.Microsecond)
 }

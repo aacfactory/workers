@@ -19,49 +19,46 @@ package workers
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	defaultConcurrency           = 256 * 1024
-	defaultWorkerMaxIdleDuration = 2 * time.Second
+	defaultMaxWorkers            = 256 * 1024
+	defaultMaxIdleWorkerDuration = 2 * time.Second
 )
 
 type Option func(*Options) error
 
 type Options struct {
-	Concurrency           int
-	WorkerMaxIdleDuration time.Duration
+	MaxWorkers            int
+	MaxIdleWorkerDuration time.Duration
 }
 
-func Concurrency(concurrency int) Option {
+func MaxWorkers(max int) Option {
 	return func(o *Options) error {
-		if concurrency < 1 {
-			return fmt.Errorf("concurrency must great than 0")
+		if max < 1 {
+			return fmt.Errorf("max workers must great than 0")
 		}
-		o.Concurrency = concurrency
+		o.MaxWorkers = max
 		return nil
 	}
 }
 
-func WorkerMaxIdleDuration(d time.Duration) Option {
+func MaxIdleWorkerDuration(d time.Duration) Option {
 	return func(o *Options) error {
 		if d < 1 {
 			return fmt.Errorf("max idle duration must great than 0")
 		}
-		o.WorkerMaxIdleDuration = d
+		o.MaxIdleWorkerDuration = d
 		return nil
 	}
 }
 
-func New(handler Handler, options ...Option) (w Workers) {
-	if handler == nil {
-		panic(fmt.Errorf("new workers failed for handler is nil"))
-		return
-	}
+func New(options ...Option) (w Workers) {
 	opt := &Options{
-		Concurrency:           defaultConcurrency,
-		WorkerMaxIdleDuration: defaultWorkerMaxIdleDuration,
+		MaxWorkers:            defaultMaxWorkers,
+		MaxIdleWorkerDuration: defaultMaxIdleWorkerDuration,
 	}
 	if options != nil {
 		for _, option := range options {
@@ -73,33 +70,36 @@ func New(handler Handler, options ...Option) (w Workers) {
 		}
 	}
 	ws := &workers{
-		maxWorkersCount:       int64(opt.Concurrency),
-		maxIdleWorkerDuration: opt.WorkerMaxIdleDuration,
+		maxWorkersCount:       int64(opt.MaxWorkers),
+		maxIdleWorkerDuration: opt.MaxIdleWorkerDuration,
 		lock:                  sync.Mutex{},
 		workersCount:          0,
+		running:               0,
 		mustStop:              false,
 		ready:                 nil,
+		delegates:             nil,
+		stopDelegatesCh:       nil,
 		stopCh:                nil,
 		workerChanPool:        sync.Pool{},
-		handler:               handler,
 	}
 	ws.serve()
 	w = ws
 	return
 }
 
-type Workers interface {
-	Execute(command interface{}) (ok bool)
-	Close()
+type Task interface {
+	Execute()
 }
 
-type Handler interface {
-	Handle(payload interface{})
+type Workers interface {
+	Dispatch(task Task) (ok bool)
+	MustDispatch(task Task)
+	Close()
 }
 
 type workerChan struct {
 	lastUseTime time.Time
-	ch          chan interface{}
+	ch          chan Task
 }
 
 type workers struct {
@@ -107,25 +107,40 @@ type workers struct {
 	maxIdleWorkerDuration time.Duration
 	lock                  sync.Mutex
 	workersCount          int64
+	running               int64
 	mustStop              bool
 	ready                 []*workerChan
+	delegates             chan Task
+	stopDelegatesCh       chan struct{}
 	stopCh                chan struct{}
 	workerChanPool        sync.Pool
-	handler               Handler
 }
 
-func (w *workers) Execute(command interface{}) (ok bool) {
+func (w *workers) Dispatch(task Task) (ok bool) {
+	if task == nil || atomic.LoadInt64(&w.running) == 0 {
+		return false
+	}
 	ch := w.getReady()
 	if ch == nil {
 		return false
 	}
-	ch.ch <- command
+	ch.ch <- task
 	return true
 }
 
+func (w *workers) MustDispatch(task Task) {
+	if task == nil || atomic.LoadInt64(&w.running) == 0 {
+		return
+	}
+	w.delegates <- task
+}
+
 func (w *workers) Close() {
+	atomic.StoreInt64(&w.running, 0)
 	close(w.stopCh)
+	close(w.stopDelegatesCh)
 	w.stopCh = nil
+	w.stopDelegatesCh = nil
 	w.lock.Lock()
 	ready := w.ready
 	for i := range ready {
@@ -138,11 +153,16 @@ func (w *workers) Close() {
 }
 
 func (w *workers) serve() {
+	w.running = 1
 	w.stopCh = make(chan struct{})
 	stopCh := w.stopCh
+	w.stopDelegatesCh = make(chan struct{})
+	stopDelegatesCh := w.stopDelegatesCh
+	w.delegates = make(chan Task, w.maxWorkersCount)
+	delegates := w.delegates
 	w.workerChanPool.New = func() interface{} {
 		return &workerChan{
-			ch: make(chan interface{}, 1),
+			ch: make(chan Task, 1),
 		}
 	}
 	go func() {
@@ -154,6 +174,21 @@ func (w *workers) serve() {
 				return
 			default:
 				time.Sleep(w.maxIdleWorkerDuration)
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case task := <-delegates:
+				for {
+					if w.Dispatch(task) {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			case <-stopDelegatesCh:
+				return
 			}
 		}
 	}()
@@ -238,11 +273,11 @@ func (w *workers) release(ch *workerChan) bool {
 
 func (w *workers) handle(wch *workerChan) {
 	for {
-		command, ok := <-wch.ch
-		if !ok {
+		task := <-wch.ch
+		if task == nil {
 			break
 		}
-		w.handler.Handle(command)
+		task.Execute()
 		if !w.release(wch) {
 			break
 		}
