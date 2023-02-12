@@ -17,7 +17,9 @@
 package workers
 
 import (
+	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,8 +79,6 @@ func New(options ...Option) (w Workers) {
 		running:               0,
 		mustStop:              false,
 		ready:                 nil,
-		delegates:             nil,
-		stopDelegatesCh:       nil,
 		stopCh:                nil,
 		workerChanPool:        sync.Pool{},
 	}
@@ -88,18 +88,27 @@ func New(options ...Option) (w Workers) {
 }
 
 type Task interface {
-	Execute()
+	Execute(ctx context.Context)
 }
 
 type Workers interface {
-	Dispatch(task Task) (ok bool)
-	MustDispatch(task Task)
+	Dispatch(ctx context.Context, task Task) (ok bool)
+	MustDispatch(ctx context.Context, task Task)
 	Close()
 }
 
 type workerChan struct {
 	lastUseTime time.Time
-	ch          chan Task
+	ch          chan *taskUnit
+}
+
+type taskUnit struct {
+	ctx  context.Context
+	task Task
+}
+
+func (unit *taskUnit) execute() {
+	unit.task.Execute(unit.ctx)
 }
 
 type workers struct {
@@ -110,13 +119,11 @@ type workers struct {
 	running               int64
 	mustStop              bool
 	ready                 []*workerChan
-	delegates             chan Task
-	stopDelegatesCh       chan struct{}
 	stopCh                chan struct{}
 	workerChanPool        sync.Pool
 }
 
-func (w *workers) Dispatch(task Task) (ok bool) {
+func (w *workers) Dispatch(ctx context.Context, task Task) (ok bool) {
 	if task == nil || atomic.LoadInt64(&w.running) == 0 {
 		return false
 	}
@@ -124,23 +131,46 @@ func (w *workers) Dispatch(task Task) (ok bool) {
 	if ch == nil {
 		return false
 	}
-	ch.ch <- task
-	return true
+	unit := &taskUnit{
+		ctx:  ctx,
+		task: task,
+	}
+	select {
+	case ch.ch <- unit:
+		ok = true
+		break
+	case <-ctx.Done():
+		break
+	}
+	return
 }
 
-func (w *workers) MustDispatch(task Task) {
+func (w *workers) MustDispatch(ctx context.Context, task Task) {
 	if task == nil || atomic.LoadInt64(&w.running) == 0 {
 		return
 	}
-	w.delegates <- task
+	times := 0
+	for {
+		ok := w.Dispatch(ctx, task)
+		if ok {
+			break
+		}
+		deadline, hasDeadline := ctx.Deadline()
+		if hasDeadline && deadline.Before(time.Now()) {
+			break
+		}
+		times++
+		if times > 9 {
+			times = 0
+			runtime.Gosched()
+		}
+	}
 }
 
 func (w *workers) Close() {
 	atomic.StoreInt64(&w.running, 0)
 	close(w.stopCh)
-	close(w.stopDelegatesCh)
 	w.stopCh = nil
-	w.stopDelegatesCh = nil
 	w.lock.Lock()
 	ready := w.ready
 	for i := range ready {
@@ -156,13 +186,9 @@ func (w *workers) serve() {
 	w.running = 1
 	w.stopCh = make(chan struct{})
 	stopCh := w.stopCh
-	w.stopDelegatesCh = make(chan struct{})
-	stopDelegatesCh := w.stopDelegatesCh
-	w.delegates = make(chan Task, w.maxWorkersCount)
-	delegates := w.delegates
 	w.workerChanPool.New = func() interface{} {
 		return &workerChan{
-			ch: make(chan Task, 1),
+			ch: make(chan *taskUnit, 1),
 		}
 	}
 	go func() {
@@ -174,21 +200,6 @@ func (w *workers) serve() {
 				return
 			default:
 				time.Sleep(w.maxIdleWorkerDuration)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case task := <-delegates:
-				for {
-					if w.Dispatch(task) {
-						break
-					}
-					time.Sleep(50 * time.Millisecond)
-				}
-			case <-stopDelegatesCh:
-				return
 			}
 		}
 	}()
@@ -273,11 +284,11 @@ func (w *workers) release(ch *workerChan) bool {
 
 func (w *workers) handle(wch *workerChan) {
 	for {
-		task := <-wch.ch
-		if task == nil {
+		unit := <-wch.ch
+		if unit == nil {
 			break
 		}
-		task.Execute()
+		unit.execute()
 		if !w.release(wch) {
 			break
 		}

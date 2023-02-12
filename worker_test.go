@@ -17,6 +17,7 @@
 package workers_test
 
 import (
+	"context"
 	"fmt"
 	"github.com/aacfactory/workers"
 	"testing"
@@ -26,8 +27,9 @@ import (
 func TestNewWorkers(t *testing.T) {
 	worker := workers.New()
 	x := 0
+	ctx := context.TODO()
 	for i := 0; i < 10; i++ {
-		ok := worker.Dispatch(&Task{
+		ok := worker.Dispatch(ctx, &Task{
 			Id: i,
 		})
 		if ok {
@@ -39,9 +41,10 @@ func TestNewWorkers(t *testing.T) {
 }
 
 func TestWorkers_MustDispatch(t *testing.T) {
+	ctx := context.TODO()
 	worker := workers.New(workers.MaxWorkers(2))
 	for i := 0; i < 10; i++ {
-		worker.MustDispatch(&Task{
+		worker.MustDispatch(ctx, &Task{
 			Id: i,
 		})
 
@@ -54,7 +57,7 @@ type Task struct {
 	Id int
 }
 
-func (task *Task) Execute() {
+func (task *Task) Execute(ctx context.Context) {
 	fmt.Println(task.Id)
 	time.Sleep(50 * time.Microsecond)
 }

@@ -17,6 +17,7 @@
 package workers_test
 
 import (
+	"context"
 	"github.com/aacfactory/workers"
 	"sync/atomic"
 	"testing"
@@ -28,8 +29,9 @@ func BenchmarkNewWorkers(b *testing.B) {
 	count := int64(0)
 	b.ReportAllocs()
 	b.ResetTimer()
+	ctx := context.TODO()
 	for i := 0; i < b.N; i++ {
-		if worker.Dispatch(&BenchmarkTask{}) {
+		if worker.Dispatch(ctx, &BenchmarkTask{}) {
 			atomic.AddInt64(&count, 1)
 		}
 	}
@@ -39,6 +41,6 @@ func BenchmarkNewWorkers(b *testing.B) {
 
 type BenchmarkTask struct{}
 
-func (task *BenchmarkTask) Execute() {
+func (task *BenchmarkTask) Execute(ctx context.Context) {
 	time.Sleep(50 * time.Millisecond)
 }

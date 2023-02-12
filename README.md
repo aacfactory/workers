@@ -13,7 +13,7 @@ Create worker task
 ```go
 type Task struct {}
 
-func (task *Task) Execute() {
+func (task *Task) Execute(ctx context.Context) {
     // todo: handle task
 }
 
@@ -23,12 +23,13 @@ New workers and execute command
 ws := workers.New()
 
 // dispatch task to worker
-if ok := ws.Dispatch(&Task{}); !ok {
-    // todo: handle 'no workers remain' or 'closed'
+ctx := context.TODO()
+if ok := ws.Dispatch(ctx, &Task{}); !ok {
+    // todo: handle 'no workers remain' or 'closed' or 'context timeout'
 }
 
 // must dispatch task to worker 
-ws.MustDispatch(&Task{})
+ws.MustDispatch(ctx, &Task{})
 
 ws.Close()
 ```
