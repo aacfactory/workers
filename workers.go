@@ -94,6 +94,7 @@ type Task interface {
 type Workers interface {
 	Dispatch(ctx context.Context, task Task) (ok bool)
 	MustDispatch(ctx context.Context, task Task)
+	Group() (group Group)
 	Close()
 }
 
@@ -165,6 +166,14 @@ func (w *workers) MustDispatch(ctx context.Context, task Task) {
 			runtime.Gosched()
 		}
 	}
+}
+
+func (w *workers) Group() (g Group) {
+	g = &group{
+		ws:    w,
+		tasks: make(map[string]GroupTask),
+	}
+	return
 }
 
 func (w *workers) Close() {
