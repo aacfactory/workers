@@ -18,6 +18,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -91,6 +92,71 @@ type Task interface {
 	Execute(ctx context.Context)
 }
 
+var (
+	ErrNoTimeoutInLongTask   = errors.New("no timeout")
+	ErrNoHeartbeatInLongTask = errors.New("no heartbeat")
+	ErrLongTaskTimeout       = errors.New("timeout")
+	ErrLongTaskNormalClosed  = errors.New("normal closed")
+)
+
+type LongTask interface {
+	Task
+	Heartbeat() (initialTimeout time.Duration, ch <-chan time.Duration)
+	OnAbort(cause error)
+}
+
+func NewAbstractLongTask(initialTimeout time.Duration) *AbstractLongTask {
+	return &AbstractLongTask{
+		locker:         sync.RWMutex{},
+		initialTimeout: initialTimeout,
+		heartbeat:      make(chan time.Duration, 2),
+	}
+}
+
+type AbstractLongTask struct {
+	locker         sync.RWMutex
+	initialTimeout time.Duration
+	heartbeat      chan time.Duration
+	aborted        bool
+	abortedCause   error
+}
+
+func (task *AbstractLongTask) Heartbeat() (initialTimeout time.Duration, ch <-chan time.Duration) {
+	initialTimeout = task.initialTimeout
+	ch = task.heartbeat
+	return
+}
+
+func (task *AbstractLongTask) OnAbort(cause error) {
+	task.locker.Lock()
+	task.locker.Unlock()
+	task.aborted = true
+	task.abortedCause = cause
+	return
+}
+
+func (task *AbstractLongTask) Aborted() (ok bool, cause error) {
+	task.locker.RLock()
+	defer task.locker.RUnlock()
+	ok = task.aborted
+	cause = task.abortedCause
+	return
+}
+
+func (task *AbstractLongTask) Touch(nextAliveTimeout time.Duration) {
+	task.locker.Lock()
+	task.locker.Unlock()
+	if task.aborted {
+		return
+	}
+	task.heartbeat <- nextAliveTimeout
+}
+
+func (task *AbstractLongTask) Close() {
+	task.OnAbort(ErrLongTaskNormalClosed)
+	close(task.heartbeat)
+}
+
 type Workers interface {
 	Dispatch(ctx context.Context, task Task) (ok bool)
 	MustDispatch(ctx context.Context, task Task)
@@ -109,7 +175,41 @@ type taskUnit struct {
 }
 
 func (unit *taskUnit) execute() {
-	unit.task.Execute(unit.ctx)
+	longTask, isLongTask := unit.task.(LongTask)
+	if isLongTask {
+		initialTimeout, heartbeat := longTask.Heartbeat()
+		if initialTimeout < 1 {
+			longTask.OnAbort(ErrNoTimeoutInLongTask)
+			return
+		}
+		if heartbeat == nil {
+			longTask.OnAbort(ErrNoHeartbeatInLongTask)
+			return
+		}
+		heartbeatTimeout := initialTimeout
+		go longTask.Execute(unit.ctx)
+		stop := false
+		for {
+			select {
+			case <-time.After(heartbeatTimeout):
+				longTask.OnAbort(ErrLongTaskTimeout)
+				stop = true
+				break
+			case nextTimeout, ok := <-heartbeat:
+				if !ok {
+					stop = true
+					break
+				}
+				heartbeatTimeout = nextTimeout
+				break
+			}
+			if stop {
+				break
+			}
+		}
+	} else {
+		unit.task.Execute(unit.ctx)
+	}
 }
 
 type workers struct {

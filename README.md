@@ -33,7 +33,34 @@ ws.MustDispatch(ctx, &Task{})
 
 ws.Close()
 ```
+LongTask for no timeout reader
+```go
+type LongTask struct {
+	*workers.AbstractLongTask
+	reader io.Reader
+}
 
+func (task *LongTask) Execute(ctx context.Context) {
+	for {
+        if aborted, cause := task.Aborted(); aborted {
+            // handle timeout
+            break
+        }
+		p := make([]byte, 0, 10)
+		n, readErr := task.reader.Read(p)
+		if readErr != nil {
+            task.Close()
+		}
+		task.Touch(3 * time.Second)
+		// handle content
+	}
+}
+```
+```go
+task := &LongTask{
+    AbstractLongTask: workers.NewAbstractLongTask(3 * time.Second),
+}
+```
 ## Benchmark
 Handler used in benchmark is sleeping 50 millisecond as handling command.
 ```text

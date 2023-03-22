@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/aacfactory/workers"
+	"io"
 	"testing"
 	"time"
 )
@@ -60,4 +61,41 @@ type Task struct {
 func (task *Task) Execute(ctx context.Context) {
 	fmt.Println(task.Id)
 	time.Sleep(50 * time.Microsecond)
+}
+
+type LongTask struct {
+	*workers.AbstractLongTask
+	closed chan struct{}
+}
+
+func (task *LongTask) Execute(ctx context.Context) {
+	n := time.Duration(1)
+	for {
+		fmt.Println("...")
+		if aborted, cause := task.Aborted(); aborted {
+			fmt.Println("aborted", cause)
+			break
+		}
+		<-time.After(n * time.Second)
+		fmt.Println(n)
+		n++
+		if n > 1 {
+			task.Close()
+		}
+		task.Touch(3 * time.Second)
+	}
+	close(task.closed)
+}
+
+func TestLongTask(t *testing.T) {
+	worker := workers.New()
+	ctx := context.TODO()
+	io.Reader{}.Read()
+	closed := make(chan struct{}, 1)
+	worker.Dispatch(ctx, &LongTask{
+		AbstractLongTask: workers.NewAbstractLongTask(3 * time.Second),
+		closed:           closed,
+	})
+	<-closed
+	worker.Close()
 }
