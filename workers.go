@@ -187,11 +187,12 @@ func (unit *taskUnit) execute() {
 			return
 		}
 		heartbeatTimeout := initialTimeout
+		heartbeatTimeoutTimer := time.NewTimer(heartbeatTimeout)
 		go longTask.Execute(unit.ctx)
 		stop := false
 		for {
 			select {
-			case <-time.After(heartbeatTimeout):
+			case <-heartbeatTimeoutTimer.C:
 				longTask.OnAbort(ErrLongTaskTimeout)
 				stop = true
 				break
@@ -200,13 +201,14 @@ func (unit *taskUnit) execute() {
 					stop = true
 					break
 				}
-				heartbeatTimeout = nextTimeout
+				heartbeatTimeoutTimer.Reset(nextTimeout)
 				break
 			}
 			if stop {
 				break
 			}
 		}
+		heartbeatTimeoutTimer.Stop()
 	} else {
 		unit.task.Execute(unit.ctx)
 	}
