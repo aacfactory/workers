@@ -92,6 +92,11 @@ type Task interface {
 	Execute(ctx context.Context)
 }
 
+type NamedTask interface {
+	Name() (name string)
+	Task
+}
+
 var (
 	ErrNoTimeoutInLongTask   = errors.New("no timeout")
 	ErrNoHeartbeatInLongTask = errors.New("no heartbeat")
