@@ -29,8 +29,8 @@ func BenchmarkNewWorkers(b *testing.B) {
 	count := int64(0)
 	b.ReportAllocs()
 	b.ResetTimer()
-	ctx := context.TODO()
 	for i := 0; i < b.N; i++ {
+		ctx := context.TODO()
 		if worker.Dispatch(ctx, &BenchmarkTask{}) {
 			atomic.AddInt64(&count, 1)
 		}

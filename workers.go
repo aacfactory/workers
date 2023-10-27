@@ -171,7 +171,7 @@ type Workers interface {
 
 type workerChan struct {
 	lastUseTime time.Time
-	ch          chan *taskUnit
+	ch          chan taskUnit
 }
 
 type taskUnit struct {
@@ -179,7 +179,7 @@ type taskUnit struct {
 	task Task
 }
 
-func (unit *taskUnit) execute() {
+func (unit taskUnit) execute() {
 	longTask, isLongTask := unit.task.(LongTask)
 	if isLongTask {
 		initialTimeout, heartbeat := longTask.Heartbeat()
@@ -239,7 +239,7 @@ func (w *workers) Dispatch(ctx context.Context, task Task) (ok bool) {
 	if ch == nil {
 		return false
 	}
-	unit := &taskUnit{
+	unit := taskUnit{
 		ctx:  ctx,
 		task: task,
 	}
@@ -290,7 +290,7 @@ func (w *workers) Close() {
 	w.lock.Lock()
 	ready := w.ready
 	for i := range ready {
-		ready[i].ch <- nil
+		close(ready[i].ch)
 		ready[i] = nil
 	}
 	w.ready = ready[:0]
@@ -304,7 +304,7 @@ func (w *workers) serve() {
 	stopCh := w.stopCh
 	w.workerChanPool.New = func() interface{} {
 		return &workerChan{
-			ch: make(chan *taskUnit, 1),
+			ch: make(chan taskUnit, 1),
 		}
 	}
 	go func() {
@@ -350,7 +350,7 @@ func (w *workers) clean(scratch *[]*workerChan) {
 	w.lock.Unlock()
 	tmp := *scratch
 	for i := range tmp {
-		tmp[i].ch <- nil
+		close(tmp[i].ch)
 		tmp[i] = nil
 	}
 }
@@ -400,8 +400,8 @@ func (w *workers) release(ch *workerChan) bool {
 
 func (w *workers) handle(wch *workerChan) {
 	for {
-		unit := <-wch.ch
-		if unit == nil {
+		unit, ok := <-wch.ch
+		if !ok {
 			break
 		}
 		unit.execute()
