@@ -290,7 +290,7 @@ func (w *workers) Close() {
 	w.lock.Lock()
 	ready := w.ready
 	for i := range ready {
-		close(ready[i].ch)
+		ready[i].ch <- taskUnit{}
 		ready[i] = nil
 	}
 	w.ready = ready[:0]
@@ -350,7 +350,7 @@ func (w *workers) clean(scratch *[]*workerChan) {
 	w.lock.Unlock()
 	tmp := *scratch
 	for i := range tmp {
-		close(tmp[i].ch)
+		tmp[i].ch <- taskUnit{}
 		tmp[i] = nil
 	}
 }
@@ -404,7 +404,12 @@ func (w *workers) handle(wch *workerChan) {
 		if !ok {
 			break
 		}
-		unit.execute()
+		if unit.task == nil || unit.ctx == nil {
+			break
+		}
+		if unit.ctx.Err() == nil {
+			unit.execute()
+		}
 		if !w.release(wch) {
 			break
 		}
